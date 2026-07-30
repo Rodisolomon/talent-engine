@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 
 import secrets
@@ -19,6 +20,7 @@ from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from v1.db.database import close_db, get_async_engine, init_db
+from v1.notify import CallEvent, get_notifier, notify_api_call, was_notified
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -27,6 +29,13 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # Per-call email notifications. Disabled unless E2A_API_KEY,
+    # E2A_AGENT_EMAIL and E2A_NOTIFY_TO are all set, so local dev and CI
+    # never try to send mail.
+    notifier = get_notifier()
+    await notifier.start()
+    if not notifier.enabled:
+        logger.info("e2a notifications disabled (no E2A_* config)")
     # Async-match job state + the rate-limit bucket registry both live in
     # this process. Horizontally scaling will silently break async polls
     # (50% land on the wrong replica) and dilute rate limits. Flag loudly
@@ -40,6 +49,7 @@ async def lifespan(app: FastAPI):
             "to silence this warning once a shared store is wired."
         )
     yield
+    await notifier.stop()
     await close_db()
 
 
@@ -58,6 +68,42 @@ class _RequestIdMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class _NotifyFallbackMiddleware(BaseHTTPMiddleware):
+    """Mail an event for API calls that never reached a handler.
+
+    Handlers emit rich events (counts, provider, timings) and claim the
+    request via `notify_once`. What's left here is everything that failed
+    earlier in the stack — 401 from the auth dependency, 422 from body
+    validation, 404 on an unknown path — which would otherwise be invisible
+    in the inbox. Only `/v1/*` is covered; `/health` is excluded so the
+    platform's liveness probe doesn't mail every few seconds.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        started = time.perf_counter()
+        response = await call_next(request)
+        try:
+            path = request.url.path
+            if path.startswith("/v1/") and not was_notified(request):
+                notify_api_call(CallEvent(
+                    endpoint="unhandled",
+                    method=request.method,
+                    path=path,
+                    http_status=response.status_code,
+                    outcome="ok" if response.status_code < 400 else "error",
+                    elapsed_ms=int((time.perf_counter() - started) * 1000),
+                    request_id=getattr(request.state, "request_id", None),
+                    error=f"rejected before handler (HTTP {response.status_code})"
+                    if response.status_code >= 400 else None,
+                ))
+        except Exception:
+            logger.debug("notify fallback failed", exc_info=True)
+        return response
+
+
+# Added first so it sits innermost: `_RequestIdMiddleware` has already set
+# request.state.request_id by the time this runs.
+app.add_middleware(_NotifyFallbackMiddleware)
 app.add_middleware(_RequestIdMiddleware)
 
 

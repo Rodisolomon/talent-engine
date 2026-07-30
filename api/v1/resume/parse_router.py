@@ -23,6 +23,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from v1.notify import CallEvent, notify_once
 from v1.resume_matching.auth import require_api_key
 from v1.resume_matching.rate_limit import enforce_rate_limit
 from v1.resume_matching.baml_client.async_client import b
@@ -208,6 +209,26 @@ async def parse_endpoint(
         status="ok",
         error=None,
         client_ip=_client_ip(request),
+    ))
+
+    notify_once(request, CallEvent(
+        endpoint="parse",
+        method="POST",
+        path="/v1/resume/parse",
+        http_status=200,
+        outcome="error" if errors else "ok",
+        elapsed_ms=elapsed_ms,
+        request_id=getattr(request.state, "request_id", None),
+        api_key_name=api_key.name,
+        api_key_id=api_key.id,
+        llm_provider=llm_provider,
+        client_ip=_client_ip(request),
+        counts={
+            "files": len(files),
+            "parsed": len(parsed),
+            "failed": len(errors),
+        },
+        error=f"{len(errors)} of {len(files)} file(s) failed to parse" if errors else None,
     ))
 
     return ParseResponse(

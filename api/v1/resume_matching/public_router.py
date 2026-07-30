@@ -28,8 +28,10 @@ from typing import Dict, List, Optional, Tuple
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from v1.notify import CallEvent, notify_once
 from v1.routers.deps import get_engine
 from v1.resume_matching.auth import require_api_key
+from v1.resume_matching.llm_config import resolve_llm_provider
 from v1.resume_matching.rate_limit import enforce_rate_limit
 from v1.resume_matching.pipeline import (
     DEFAULT_CONCURRENCY,
@@ -201,6 +203,22 @@ def _client_ip(request: Request) -> Optional[str]:
     return None
 
 
+def _request_id(request: Request) -> Optional[str]:
+    return getattr(request.state, "request_id", None)
+
+
+def _provider_safe() -> Optional[str]:
+    """Provider name for the notification, or None.
+
+    `resolve_llm_provider` raises on a bad LLM_PROVIDER; a notification must
+    never be the thing that turns a working request into a 500.
+    """
+    try:
+        return resolve_llm_provider()
+    except Exception:
+        return None
+
+
 def _resolve_concurrency(req: MatchRequest) -> int:
     requested = req.options.concurrency or DEFAULT_CONCURRENCY
     # Hard server cap so a client can't blow the LLM quota with one request.
@@ -256,6 +274,26 @@ async def match_sync(
             status="error" if error_str else "ok",
             error=error_str,
             client_ip=_client_ip(request),
+        ))
+        notify_once(request, CallEvent(
+            endpoint="match",
+            method="POST",
+            path="/v1/resume-matching/match",
+            http_status=500 if error_str else 200,
+            outcome="error" if error_str else "ok",
+            elapsed_ms=elapsed_ms,
+            request_id=_request_id(request),
+            api_key_name=api_key.name,
+            api_key_id=api_key.id,
+            llm_provider=_provider_safe(),
+            client_ip=_client_ip(request),
+            counts={
+                "resumes": len(payload.resumes),
+                "jobs": len(payload.jobs),
+                "pairs": len(pairs),
+                "failed": sum(1 for p in pair_results if p.score is None),
+            },
+            error=error_str,
         ))
 
 
@@ -327,12 +365,35 @@ async def match_async(
             ))
 
     job.task = asyncio.create_task(_worker())
+
+    # Notifies on acceptance, not completion — this is the API call. The
+    # job's terminal state reaches the inbox through the poll notifications.
+    notify_once(request, CallEvent(
+        endpoint="match_async",
+        method="POST",
+        path="/v1/resume-matching/match/async",
+        http_status=202,
+        outcome="ok",
+        elapsed_ms=0,
+        request_id=_request_id(request),
+        api_key_name=api_key.name,
+        api_key_id=api_key.id,
+        llm_provider=_provider_safe(),
+        client_ip=client_ip,
+        job_id=job_id,
+        counts={
+            "resumes": len(payload.resumes),
+            "jobs": len(payload.jobs),
+            "pairs": len(pairs),
+        },
+    ))
     return AsyncJobAccepted(job_id=job_id, status="queued")
 
 
 @router.get("/match/{job_id}", response_model=AsyncPollResponse)
 async def match_poll(
     job_id: str,
+    request: Request,
     api_key: ApiKeyRecord = Depends(require_api_key),
 ) -> AsyncPollResponse:
     """Return the current state of an async match job.
@@ -340,10 +401,50 @@ async def match_poll(
     404 covers three cases without distinguishing them: never existed,
     expired (>1h old), or lost to a server restart. Clients are expected
     to retry-from-scratch on 404.
+
+    Every poll emits an email notification. Partners are told to poll every
+    2s (接入文档.md), so one long job produces a long run of near-identical
+    messages — intended, and the reason the notify queue sheds under load.
     """
+    started = time.perf_counter()
+
+    def _notify(
+        *,
+        http_status: int,
+        outcome: str,
+        state: str,
+        counts: Optional[Dict[str, int]] = None,
+    ) -> None:
+        notify_once(request, CallEvent(
+            endpoint="match_poll",
+            method="GET",
+            path=f"/v1/resume-matching/match/{job_id}",
+            http_status=http_status,
+            outcome=outcome,
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+            request_id=_request_id(request),
+            api_key_name=api_key.name,
+            api_key_id=api_key.id,
+            client_ip=_client_ip(request),
+            job_id=job_id,
+            note=state,
+            counts=counts or {},
+        ))
+
     job = await _jobs.get(job_id)
     if job is None:
+        _notify(http_status=404, outcome="error", state="not_found")
         raise HTTPException(404, "Job not found or expired")
+
+    # HTTP is 200 even for a failed job, so the notification's outcome
+    # tracks the *job* state — otherwise every failure looks like a success
+    # in the inbox.
+    _notify(
+        http_status=200,
+        outcome="error" if job.status == "failed" else "ok",
+        state=job.status,
+        counts={"pairs_done": job.pairs_done, "pairs_total": job.pairs_total},
+    )
 
     progress = AsyncJobProgress(
         pairs_done=job.pairs_done, pairs_total=job.pairs_total,
