@@ -89,6 +89,7 @@ In `.env`, set:
 - `LLM_PROVIDER` to `Qwen` or `DeepSeek`.
 - The matching `<PROVIDER>_API_KEY`.
 - Leave the explicit `DATABASE_URL` commented out — `docker-compose.yml` constructs it from `MYSQL_PASSWORD` and points at the `db` service.
+- Optionally `E2A_API_KEY` + `E2A_AGENT_EMAIL` + `E2A_NOTIFY_TO` to email a summary of every API call. All three are required or the notifier stays off. Be aware that `GET /match/{job_id}` mails on **every poll** and partners poll every 2s — see the notifications section in [README.md](README.md).
 
 ### Step 6: Start the stack
 
