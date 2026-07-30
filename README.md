@@ -16,6 +16,7 @@ api/
     resume/parse_router.py     # POST /v1/resume/parse (PDF → structured)
     resume/pdf_text.py         # pypdf wrapper
     job/parse_router.py        # POST /v1/job/parse (JD text → structured)
+    notify/                    # e2a email notification, one per API call
     resume_matching/           # the matching service
       public_router.py         # POST /match, /match/async, GET /match/{id}
       pipeline.py              # parse + score orchestration
@@ -100,6 +101,37 @@ python -m v1.resume_matching.scripts.manage_api_keys rotate <partner-name>
 
 The older `create_api_key` script is still wired for backwards compatibility
 but `manage_api_keys` is the recommended entry point.
+
+## Email notifications (e2a)
+
+Every `/v1/*` call emails a one-message summary via [e2a](https://e2a.dev).
+Off unless all three of `E2A_API_KEY`, `E2A_AGENT_EMAIL`, `E2A_NOTIFY_TO`
+are set — so local dev and CI never send mail.
+
+```bash
+E2A_API_KEY=e2a_agt_...
+E2A_AGENT_EMAIL=talent-engine@team.tokencanopy.com
+E2A_NOTIFY_TO=ops@example.com        # comma-separated for several
+E2A_NOTIFY_ENABLED=0                 # mute without removing credentials
+```
+
+Bodies are **metadata only** — endpoint, key name, request id, counts,
+latency, status, provider. No résumé or JD content is ever mailed, and
+`CallEvent` has no field that could carry it ([a test enforces
+that](api/v1/notify/tests/test_e2a_notifier.py)). Résumé PII stays on the
+existing LLM-provider egress path.
+
+Two things worth knowing before turning this on in production:
+
+- **`GET /match/{job_id}` mails on every poll.** Partners are told to poll
+  every 2s ([接入文档.md](接入文档.md)), so one 3-minute async match produces
+  roughly 90 emails. That is intended behaviour, not a bug.
+- **Delivery is fire-and-forget and shed under load.** Sends go through a
+  bounded in-process queue (`E2A_NOTIFY_QUEUE_MAX`, default 1000) drained by
+  `E2A_NOTIFY_WORKERS` (default 2). When mail falls behind the request rate
+  the queue drops events and logs a running count — a mail backlog must
+  never become a memory leak or slow down a partner's request. Nothing in
+  this path can fail an API call.
 
 ## China deployment
 

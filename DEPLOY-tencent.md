@@ -46,7 +46,13 @@ Cloud Hosting deploys directly from a git repo, building the `Dockerfile` in you
 5. **Service config:**
    - Listen port: `80` (Cloud Hosting routes external traffic to whatever port your container listens on; the Dockerfile reads `$PORT`).
    - Min replicas: `1` (avoid cold starts on partner traffic).
-   - Max replicas: `3` (raise as traffic grows).
+   - Max replicas: **`1`** — not a typo, and not a knob to raise with traffic.
+     `_AsyncJobStore` and the rate-limit registry both live in process
+     memory, so a second replica makes most `/match/{job_id}` polls land on
+     a container that never heard of the job (404) and divides every rate
+     limit by the replica count. `api/main.py` logs a warning about this at
+     every boot. Raise it only after a shared store (Redis) is wired, then
+     set `TALENT_ENGINE_ALLOW_MULTI_REPLICA=1` to silence the warning.
    - Memory: `1 GB` (enough for FastAPI + concurrent BAML calls).
 6. **Env vars** (under 环境变量):
    ```
@@ -54,7 +60,16 @@ Cloud Hosting deploys directly from a git repo, building the `Dockerfile` in you
    DATABASE_URL=mysql://<user>:<pass>@<mysql-private-ip>:3306/talent_engine
    LLM_PROVIDER=Qwen          # or Hunyuan / DeepSeek
    QWEN_API_KEY=sk-...        # only the active provider's key is required
+
+   # Per-call email notifications — omit all three to leave them off.
+   E2A_API_KEY=e2a_agt_...
+   E2A_AGENT_EMAIL=talent-engine@team.tokencanopy.com
+   E2A_NOTIFY_TO=ops@example.com
    ```
+
+   Note that `GET /match/{job_id}` mails on **every poll**, and partners
+   poll every 2s — see the notifications section in
+   [README.md](README.md) before enabling this on partner traffic.
 7. Click 部署. First deploy takes ~5–10 min (Docker build + image push + container start).
 
 ### Option 2: CLI-based deploy via tcb-cli (faster for repeated pushes)
@@ -74,7 +89,7 @@ To mint the first API key, exec into a running container:
 
 ```bash
 # From console: 服务管理 → talent-engine-api → 实例 → 登录 (web shell)
-python -m v1.resume_matching.scripts.create_api_key "first-partner"
+python -m v1.resume_matching.scripts.manage_api_keys create "first-partner"
 ```
 
 The plaintext key is printed once. Store it somewhere safe before closing the shell.

@@ -19,8 +19,11 @@ Five public endpoints, three subsystems:
                          │   BAML client (Default → Gemini/Qwen/Hunyuan/DeepSeek)
                          │       selected by LLM_PROVIDER env var
                          │
-                         └─→ UsageStore.log(...)  → MySQL v1_resume_matching_usage
-                             ApiKeyStore.lookup() → MySQL v1_resume_matching_api_keys
+                         ├─→ UsageStore.log(...)  → MySQL v1_resume_matching_usage
+                         │   ApiKeyStore.lookup() → MySQL v1_resume_matching_api_keys
+                         │
+                         └─→ notify_once(CallEvent) → bounded queue → e2a SDK
+                             (one email per call; metadata only)
 ```
 
 Key boundaries:
@@ -29,6 +32,26 @@ Key boundaries:
 - **`pipeline.py`** is pure orchestration. Routers handle HTTP / validation / auth / usage logging; the pipeline only does parse + score over BAML.
 - **`baml_src/*.baml`** is the source of truth for LLM prompts. `baml_client/` is generated (gitignored). Rebuild after editing: `cd v1/resume_matching && baml-cli generate`. The Dockerfile re-runs this during image build, so prod always reflects the committed `.baml`.
 - **JD splitting** (`pipeline._split_jd_text`) is regex-based on the `招聘单位` header — deterministic and tested ([test_split_jd.py](api/v1/resume_matching/tests/test_split_jd.py)). Don't replace with an LLM call: bundled-file extraction is exactly where LLMs drop/merge/hallucinate jobs.
+
+## Per-call email notifications
+
+`v1/notify/` mails one metadata-only summary per `/v1/*` call through the
+e2a SDK. Two invariants, both load-bearing:
+
+- **It can't fail a request.** `notify()` is synchronous, non-blocking, and
+  swallows everything; `notify_api_call` guards the singleton lookup too.
+  Same contract as `UsageStore.log`.
+- **It can't carry candidate data.** `CallEvent` has counts and ids, no free
+  text for résumé content. A test asserts the exact field set, so adding a
+  field that could hold PII fails CI. Keep it that way.
+
+Handlers emit rich events and claim the request via `notify_once`; a
+fallback middleware in `main.py` covers whatever never reached a handler
+(401, 400, 404). `/health` is excluded so liveness probes don't mail.
+
+`GET /match/{job_id}` mails **per poll** — deliberate, per the operator's
+request, and the reason the send queue is bounded and sheds rather than
+growing. Drops are counted and logged.
 
 ## Single-replica constraint
 
