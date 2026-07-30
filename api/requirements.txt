@@ -9,6 +9,9 @@ pymysql
 cryptography
 httpx
 pypdf
+# Ships the `baml-cli` executable used by CI and the Dockerfile to run
+# `baml-cli generate`. Do NOT re-add a separate `baml-cli` requirement —
+# that PyPI dist is gone (404) and was only ever a shim; the real binary
+# is `from baml_py import invoke_runtime_cli`.
 baml-py==0.220.0
-baml-cli
 e2a>=5.4.0
