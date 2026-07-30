@@ -43,6 +43,12 @@ services:
       HUNYUAN_API_KEY: ${HUNYUAN_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      # Per-call email notifications. All three must be set or the notifier
+      # stays off (which is the right default for a local `compose up`).
+      E2A_API_KEY: ${E2A_API_KEY:-}
+      E2A_AGENT_EMAIL: ${E2A_AGENT_EMAIL:-}
+      E2A_NOTIFY_TO: ${E2A_NOTIFY_TO:-}
+      E2A_NOTIFY_ENABLED: ${E2A_NOTIFY_ENABLED:-1}
     ports:
       # Host port 8002 (8000/8001 are commonly used by mnexa-ai's local stack).
       # Container listens on 8000 — the in-container PORT.

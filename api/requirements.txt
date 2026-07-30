@@ -11,3 +11,4 @@ httpx
 pypdf
 baml-py==0.220.0
 baml-cli
+e2a>=5.4.0
