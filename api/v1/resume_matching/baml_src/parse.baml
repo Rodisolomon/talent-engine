@@ -1,40 +1,36 @@
-// Extraction functions — resume PDF → Resume, JD text → Job.
+// 抽取函数：简历 PDF 文本 → Resume，JD 文本 → Job。
 //
-// JD files often bundle multiple jobs in one file. Rather than ask one LLM
-// call to both split AND parse (risk: dropped or merged jobs, silent field
-// hallucination), we split in Python on the 招聘单位 header — which every
-// real JD the client ships uses exactly once per job — and then call
-// ParseSingleJob on each chunk in parallel.
+// JD 文件常常一份里塞多个岗位。与其让一次调用同时做「切分 + 抽取」（风险：
+// 漏岗、并岗、字段幻觉），不如在 Python 里按 招聘单位 这个表头切开 —— 客户
+// 目前给的每份真实 JD 都是每个岗位出现一次这个词 —— 再对每一段并行调用
+// ParseSingleJob。
 //
-// ParseJobDescriptions (list-output) remains as a last-resort fallback
-// for inputs where no 招聘单位 header is found (unexpected format).
+// ParseJobDescriptions（一次返回列表）只作为兜底：当文件里找不到 招聘单位
+// 表头（格式不符合预期）时才用。
 
 function ParseResume(text: string) -> Resume {
   client Default
   prompt #"
-    You are parsing a Chinese job-seeker resume. The input is plain text
-    extracted from a PDF — formatting and layout cues may be lost, so
-    rely on field labels and ordering. Extract the fields defined by
-    the Resume schema. Rules:
+    你在解析一份中文求职简历。输入是从 PDF 里提取出来的纯文本，排版和布局
+    线索可能已经丢失，请依靠字段标签和先后顺序来判断。按 Resume 结构抽取
+    字段，规则如下：
 
-    - Dates: keep the candidate's original format (e.g. "2022.9-2026.6").
-    - Age: if the resume states an age directly, fill `age`; otherwise fill
-      `birth_year` and leave age null. Do not compute age yourself.
-    - education[] should be newest-first. Map 学位/学历 to degree:
-      "高中" / "专科" / "本科" / "研究生" / "博士".
-    - experience[]: combine 实习经历, 工作经历, and 校园经历 into one list.
-      Use bullet points joined by newlines for `description`.
-    - certifications: certificates, awards, and licenses. Keep the original
-      Chinese phrasing (e.g. "护士执业资格证", "C1驾照", "普通话二级甲等").
-    - skills: tools/tech/soft skills that aren't certificates.
-    - raw_text: the input text, unchanged. This is our verification that
-      the model saw the whole resume.
-    - If a field is not stated in the resume, leave it null or empty. Do
-      not guess. Do not translate Chinese to English.
+    - 日期：保留简历原本的写法（例如 "2022.9-2026.6"）。
+    - 年龄：简历直接写明年龄时填 age；否则填 birth_year 并让 age 留空。
+      不要自己推算年龄。
+    - education[] 最新的排最前。学位/学历映射为：
+      "高中" / "中专" / "专科" / "本科" / "研究生" / "博士"。
+      中专（中等专业学校）与高中同级，不要归为专科。
+    - experience[]：把 实习经历、工作经历、校园经历 合并进同一个列表。
+      description 用换行连接各条要点。
+    - certifications：证书、奖项、执照。保留中文原文（例如 "护士执业资格证"、
+      "C1驾照"、"普通话二级甲等"）。
+    - skills：工具、技术、软技能，不属于证书的那些。
+    - 简历里没写的字段就留空（null 或空数组），不要猜，也不要把中文翻成英文。
 
     {{ ctx.output_format }}
 
-    Resume:
+    简历:
     ```
     {{ text }}
     ```
@@ -44,61 +40,54 @@ function ParseResume(text: string) -> Resume {
 function ParseSingleJob(text: string) -> Job {
   client Default
   prompt #"
-    You are parsing ONE Chinese job description. The input contains exactly
-    one job posting. Extract the fields defined by the Job schema.
+    你在解析一条中文招聘岗位描述。输入里正好只有一个岗位。按 Job 结构抽取
+    字段，规则如下：
 
-    Rules:
-
-    - education_min: map to one of "高中" / "专科" / "本科" / "研究生".
-      If the JD says "大专及以上" → "专科"; "本科及以上" → "本科". If not
-      stated, leave null.
-    - age_min / age_max: parse ranges like "18-28岁" → 18/28, "35岁以下"
-      → null/35, "30岁以下" → null/30.
-    - majors_preferred: keep the original Chinese phrasing as listed
-      ("空乘", "计算机相关专业", "金融/经济"). Do not split "计算机相关"
-      into every possible major — keep it as-is.
-    - experience_years_min: "1年以上" → 1, "3年以上需求分析经验" → 3. If
-      the JD says "可接收应届毕业生", still extract the stated years for
-      the normal case and note the applied-fresh exception in raw_text.
-    - gender_preference: "男女不限" → "不限"; "女生优先" → "不限"
-      (preference not hard); explicit "仅限女" → "女".
-    - height_min_cm: "身高170cm以上" → 170, "165cm及以上" → 165. Null if
-      not mentioned.
-    - certifications_required: only those explicitly required
-      (护士职业资格证, C1驾照). Skills like "熟练Office" go in `duties` or
-      be omitted — they aren't certificates.
-    - image_requirements: copy the 形象气质 / 身高 / 服务意识 sentence
-      verbatim if present. If absent leave null.
-    - salary_min / salary_max: parse "综合薪资3600-4000元" → 3600/4000,
-      "5K-6K" → 5000/6000, "综合薪资5000+" → 5000/null.
-    - location: include city + district when given (e.g. "济南市历下区").
-    - benefits: extract "五险", "五险一金", "双休", "食宿", "节假日三薪" etc.
-    - raw_text: the full input text, unchanged. This is our verification
-      that the model saw the whole chunk.
+    - education_min：映射为 "高中" / "中专" / "专科" / "本科" / "研究生"
+      之一。映射到 JD 实际写明的那一档，绝不要降到下一档：
+      "中专以上" / "中专及以上" → "中专"；"高中以上" → "高中"；
+      "大专及以上" → "专科"；"本科及以上" → "本科"。JD 没写就留空。
+    - age_min / age_max：解析区间，"18-28岁" → 18/28，"35岁以下" → null/35，
+      "30岁以下" → null/30。
+    - majors_preferred：保留 JD 原本的中文写法（"空乘"、"计算机相关专业"、
+      "金融/经济"）。不要把"计算机相关"展开成所有可能的专业，原样保留。
+    - experience_years_min："1年以上" → 1，"3年以上需求分析经验" → 3。
+      JD 写了"可接收应届毕业生"时，仍按常规情形抽取写明的年限，把应届例外
+      留在 raw_text 里。
+    - gender_preference："男女不限" → "不限"；"女生优先" → "不限"
+      （优先不等于硬性要求）；明确写"仅限女" → "女"。
+    - height_min_cm："身高170cm以上" → 170，"165cm及以上" → 165。没提就留空。
+    - certifications_required：只填明确要求必须持有的证书（护士职业资格证、
+      C1驾照）。"熟练Office"这类技能属于 duties 或直接省略，它不是证书。
+    - image_requirements：有 形象气质 / 身高 / 服务意识 这类句子时原样抄录，
+      没有就留空。
+    - salary_min / salary_max："综合薪资3600-4000元" → 3600/4000，
+      "5K-6K" → 5000/6000，"综合薪资5000+" → 5000/null。
+    - location：城市 + 区都给出时都要（例如 "济南市历下区"）。
+    - benefits：抽取 "五险"、"五险一金"、"双休"、"食宿"、"节假日三薪" 等。
+    - raw_text：输入原文，一字不改。这是我们核对模型是否看全了这一段的依据。
 
     {{ ctx.output_format }}
 
-    Job posting:
+    岗位描述:
     ```
     {{ text }}
     ```
   "#
 }
 
-// Fallback: single-call list parse. Used only when DetectJobBoundaries
-// produces obviously bad output (invalid offsets, nothing detected but
-// input non-empty, etc). Kept so pipeline has a degraded-but-working path.
+// 兜底：一次调用返回岗位列表。仅当 Python 侧按 招聘单位 切分后什么都没找到
+// （格式不符合预期）时才会走到这里。
 function ParseJobDescriptions(text: string) -> Job[] {
   client Default
   prompt #"
-    You are parsing a Chinese job-description document that may contain one
-    or more jobs. Return one Job entry per job. Follow the same field rules
-    as ParseSingleJob (age/education/salary parsing, etc). If the document
-    is empty return an empty list.
+    你在解析一份中文招聘文档，里面可能有一个或多个岗位。每个岗位返回一条
+    Job 记录。字段规则与 ParseSingleJob 相同（年龄、学历、薪资的解析方式
+    等等）。文档为空时返回空列表。
 
     {{ ctx.output_format }}
 
-    Document:
+    文档:
     ```
     {{ text }}
     ```

@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from v1.resume_matching.pipeline import JobInput, MatchReport, ResumeInput, match_all
+from v1.resume_matching.public_schema import total_score, verdict_for
 
 DATA_DIR = Path.home() / "Desktop" / "岗位说明以及简历"
 OUT_DIR = Path(__file__).resolve().parent / "out"
@@ -89,7 +90,11 @@ def _render_markdown(report: MatchReport) -> str:
             jp = report.jobs[m.job_index]
             j = jp.job
             s = m.score
-            lines.append(f"**#{rank}  {j.company} — {j.position}  (score: {s.score}, {s.verdict})**")
+            total = total_score(s)
+            lines.append(
+                f"**#{rank}  {j.company} — {j.position}  "
+                f"(score: {total}, {verdict_for(total, list(s.hard_fails))})**"
+            )
             lines.append(f"- 推理: {s.reasoning}")
             if s.hard_fails:
                 lines.append(f"- ⚠️ 硬不合: {'; '.join(s.hard_fails)}")
@@ -136,8 +141,10 @@ async def main() -> None:
                 "top_matches": [
                     {
                         "job_index": m.job_index,
-                        "score": m.score.score,
-                        "verdict": m.score.verdict,
+                        "score": total_score(m.score),
+                        "verdict": verdict_for(
+                            total_score(m.score), list(m.score.hard_fails)
+                        ),
                         "hard_fails": m.score.hard_fails,
                         "gaps": m.score.gaps,
                     }

@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from v1.resume_matching import pipeline as pipeline_mod
+from v1.resume_matching.public_schema import SCORE_WEIGHTS
 from v1.resume_matching import public_router as public_router_mod
 from v1.resume_matching.baml_client.types import MatchScore
 from v1.resume_matching.public_router import router
@@ -86,9 +87,14 @@ def clear_async_jobs():
 # ---------------------------------------------------------------------------
 
 
-def _score_obj(score: int, verdict: str = "可推荐") -> MatchScore:
+def _score_obj(score: int) -> MatchScore:
+    """Build a MatchScore whose five dimensions sum to `score`."""
+    out, left = {}, score
+    for field, cap in SCORE_WEIGHTS.items():
+        out[field] = max(0, min(left, cap))
+        left -= out[field]
     return MatchScore(
-        score=score, verdict=verdict,
+        **out,
         hard_fails=[], strengths=[f"匹配度 {score}"],
         gaps=[], reasoning=f"score={score}",
     )
@@ -108,7 +114,7 @@ class BamlStub:
         self.score_latency = 0.0
 
     async def ScoreMatch(  # noqa: N802
-        self, *, resume, job, baml_options=None,
+        self, *, resume, job, today: str = "", baml_options=None,
     ) -> MatchScore:
         self.calls += 1
         if self.score_latency:

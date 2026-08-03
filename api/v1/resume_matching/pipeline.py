@@ -15,6 +15,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from baml_py import Collector, Pdf
@@ -23,6 +24,7 @@ from v1.resume_matching.baml_client.async_client import b
 from v1.resume_matching.baml_client.types import Job, MatchScore, Resume
 from v1.resume_matching.llm_call import with_timeout_retry
 from v1.resume_matching.llm_config import resolve_llm_provider
+from v1.resume_matching.public_schema import total_score, verdict_for
 
 # Progress event callback signature. The router wires this to an SSE queue so
 # the frontend can render live counts. Keep callback non-awaiting-critical:
@@ -186,13 +188,32 @@ def _split_jd_text(text: str) -> List[str]:
     return [c for c in chunks if c]
 
 
+def _today() -> str:
+    """Reference date handed to ScoreMatch.
+
+    Without it the model derives age from `birth_year` against whatever year
+    it assumes the present to be — observed computing "约39岁" for a 1985
+    birth year, i.e. anchored to 2024. Harmless far from an age cap, wrong
+    for anyone near one.
+    """
+    return datetime.now(timezone.utc).date().isoformat()
+
+
 async def _score(
     resume: Resume,
     job: Job,
     sem: asyncio.Semaphore,
+    provider: str,
+    today: str,
 ) -> MatchScore:
     async with sem:
-        return await b.ScoreMatch(resume=resume, job=job)
+        return await with_timeout_retry(
+            lambda: b.ScoreMatch(
+                resume=resume, job=job, today=today,
+                baml_options={"client": provider},
+            ),
+            label="ScoreMatch",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +264,7 @@ async def score_pairs(
     # Resolve once per request — reading os.getenv on every pair adds nothing
     # but makes behaviour non-monotonic if someone flips the env mid-batch.
     provider = resolve_llm_provider()
+    today = _today()
 
     async def _emit() -> None:
         if on_progress is None:
@@ -262,7 +284,7 @@ async def score_pairs(
             async with sem:
                 score = await with_timeout_retry(
                     lambda: b.ScoreMatch(
-                        resume=resume, job=job,
+                        resume=resume, job=job, today=today,
                         baml_options={"client": provider, "collector": collector},
                     ),
                     label="ScoreMatch",
@@ -339,6 +361,10 @@ async def match_all(
     caller is expected to swallow exceptions in its own callback.
     """
     sem = asyncio.Semaphore(concurrency)
+    # Resolve once per run, same reasoning as score_pairs — flipping the env
+    # mid-batch shouldn't make half the pairs go to a different provider.
+    provider = resolve_llm_provider()
+    today = _today()
 
     async def _emit(event: Dict[str, Any]) -> None:
         if on_progress is None:
@@ -427,7 +453,7 @@ async def match_all(
             })
             return ResumeReport(filename=filename, resume=resume, top_matches=[])
 
-        score_coros = [_score(resume, jp.job, sem) for jp in job_list]
+        score_coros = [_score(resume, jp.job, sem, provider, today) for jp in job_list]
         results = await asyncio.gather(*score_coros, return_exceptions=True)
 
         matches: List[Match] = []
@@ -436,16 +462,19 @@ async def match_all(
                 logger.warning("ScoreMatch failed for %s x job %d: %s", filename, j_idx, res)
                 continue
             matches.append(Match(job_index=j_idx, score=res))  # type: ignore[arg-type]
-        matches.sort(key=lambda m: m.score.score, reverse=True)
+        matches.sort(key=lambda m: total_score(m.score), reverse=True)
         resume_counter["scored"] += 1
         top = matches[:top_k]
+        top_total = total_score(top[0].score) if top else None
         await _emit({
             "type": "resume_scored",
             "filename": filename,
             "resumes_scored": resume_counter["scored"],
             "resumes_total": total_resumes,
-            "top_score": top[0].score.score if top else None,
-            "top_verdict": top[0].score.verdict if top else None,
+            "top_score": top_total,
+            "top_verdict": (
+                verdict_for(top_total, list(top[0].score.hard_fails)) if top else None
+            ),
         })
         return ResumeReport(
             filename=filename,

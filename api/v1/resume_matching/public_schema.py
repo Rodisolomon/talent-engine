@@ -127,12 +127,71 @@ class MatchRequest(BaseModel):
     options: MatchOptions = Field(default_factory=MatchOptions)
 
 
+# Per-dimension caps. These ARE the weighting — change them here and the
+# weighting changes, without touching a prompt. Keys match BAML MatchScore.
+SCORE_WEIGHTS: dict[str, int] = {
+    "score_experience": 40,
+    "score_skills": 20,
+    "score_education": 20,
+    "score_age": 10,
+    "score_other": 10,
+}
+
+# Total → verdict, highest band first. Bands sit ~5pt below the pre-weighting
+# thresholds because earned-point scoring can't reach the old top of range.
+VERDICT_BANDS: tuple[tuple[int, str], ...] = ((85, "强烈推荐"), (70, "可推荐"), (55, "勉强"))
+VERDICT_LOWEST = "不推荐"
+
+
+def score_components(baml) -> dict[str, int]:
+    """Per-dimension scores, clamped to their caps.
+
+    Clamping is defensive: nothing stops the model returning 45 out of 40,
+    and an out-of-range dimension would silently inflate the total.
+    """
+    return {
+        field: max(0, min(int(getattr(baml, field, 0) or 0), cap))
+        for field, cap in SCORE_WEIGHTS.items()
+    }
+
+
+def total_score(baml) -> int:
+    """Authoritative total — summed here, never taken from the model.
+
+    Asking an LLM to add five numbers is asking for the one thing it is
+    worst at: deepseek-chat disagreed with its own stated breakdown in 7 of
+    8 checkable runs, always low by 6-22 points.
+    """
+    return sum(score_components(baml).values())
+
+
+def verdict_for(total: int, hard_fails: List[str]) -> str:
+    """Verdict is a pure function of total + hard_fails, so Python owns it."""
+    if hard_fails:
+        return VERDICT_LOWEST
+    for threshold, label in VERDICT_BANDS:
+        if total >= threshold:
+            return label
+    return VERDICT_LOWEST
+
+
 class MatchResultItem(BaseModel):
-    """One (resume, job) score. Mirrors BAML MatchScore + the two ids."""
+    """One (resume, job) score.
+
+    `score` and `verdict` are derived server-side from the five dimensions;
+    the model supplies only the per-dimension numbers. The dimensions are
+    exposed so the client can show a breakdown and so the operator can audit
+    that the weighting was actually applied.
+    """
     resume_id: str
     job_id: str
     score: int
     verdict: str
+    score_experience: int
+    score_skills: int
+    score_education: int
+    score_age: int
+    score_other: int
     hard_fails: List[str]
     strengths: List[str]
     gaps: List[str]
@@ -279,12 +338,16 @@ def to_baml_job(public: PublicJob):
 
 
 def from_baml_score(*, resume_id: str, job_id: str, score) -> MatchResultItem:
+    hard_fails = list(score.hard_fails)
+    components = score_components(score)
+    total = sum(components.values())
     return MatchResultItem(
         resume_id=resume_id,
         job_id=job_id,
-        score=score.score,
-        verdict=score.verdict,
-        hard_fails=list(score.hard_fails),
+        score=total,
+        verdict=verdict_for(total, hard_fails),
+        **components,
+        hard_fails=hard_fails,
         strengths=list(score.strengths),
         gaps=list(score.gaps),
         reasoning=score.reasoning,
