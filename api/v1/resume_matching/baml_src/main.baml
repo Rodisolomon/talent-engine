@@ -104,11 +104,20 @@ client<llm> Hunyuan {
 // DeepSeek — text-only. Strong Chinese, very low cost per token.
 // ---------------------------------------------------------------------------
 
+// deepseek-chat defaults to a 4096 output cap where the Gemini clients set
+// 65536. Raised to the model ceiling as a guard: output that exceeds the cap
+// truncates mid-JSON and surfaces as a BAML parse error, which
+// with_timeout_retry deliberately does not retry.
+// Not a demonstrated failure — a 12KB resume parsed fine under both 4096 and
+// 8192, because the model compresses `raw_text` rather than echoing it
+// verbatim, so output does not grow linearly with input.
 client<llm> DeepSeek {
   provider openai-generic
   options {
     base_url "https://api.deepseek.com/v1"
     api_key env.DEEPSEEK_API_KEY
     model "deepseek-chat"
+    max_tokens 8192
   }
 }
+
