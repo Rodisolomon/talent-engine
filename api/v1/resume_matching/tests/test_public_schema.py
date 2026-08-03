@@ -19,6 +19,7 @@ from v1.resume_matching.baml_client.types import (
 )
 from v1.resume_matching.public_schema import (
     PublicEducation,
+    apply_deterministic_rules,
     PublicExperience,
     PublicJob,
     PublicResume,
@@ -142,3 +143,71 @@ def test_from_baml_score_carries_full_reasoning() -> None:
     assert item.strengths == ["学历匹配", "专业相关"]
     assert item.gaps == ["缺少行业经验"]
     assert item.reasoning.startswith("整体")
+
+
+# ---------------------------------------------------------------------------
+# Deterministic overrides — rules Python enforces instead of trusting the model
+# ---------------------------------------------------------------------------
+
+
+def _score(education_points: int) -> BamlMatchScore:
+    return BamlMatchScore(
+        score_experience=0, score_skills=0, score_education=education_points,
+        score_age=0, score_other=0,
+        hard_fails=[], strengths=[], gaps=[], reasoning="",
+    )
+
+
+def _job(education_min, age_min=None, age_max=None):
+    return BamlJob(
+        company="c", position="p", education_min=education_min, age_min=age_min,
+        age_max=age_max, majors_preferred=[], experience_years_min=None,
+        gender_preference=None, height_min_cm=None, certifications_required=[],
+        image_requirements=None, duties=[], salary_min=None, salary_max=None,
+        work_schedule=None, location="", benefits=[], raw_text="",
+    )
+
+
+def _resume(education, birth_year=None, age=None):
+    return BamlResume(
+        name=None, gender=None, birth_year=birth_year, age=age, phone=None,
+        email=None, hometown=None, education=education, experience=[],
+        certifications=[], skills=[], languages=[], self_evaluation=None,
+        raw_text="",
+    )
+
+
+def _edu(degree):
+    return BamlEducation(school="s", degree=degree, major=None, start=None,
+                         end=None, gpa_or_rank=None)
+
+
+def test_education_unstated_against_a_requirement_scores_zero() -> None:
+    """The model awards full marks here in most runs; Python overrides it."""
+    score = _score(20)
+    apply_deterministic_rules(score, _resume([]), _job("中专"), "2026-08-02")
+    assert score.score_education == 0
+
+
+def test_stated_degree_is_left_alone() -> None:
+    score = _score(20)
+    apply_deterministic_rules(score, _resume([_edu("专科")]), _job("中专"), "2026-08-02")
+    assert score.score_education == 20
+
+
+def test_age_is_computed_not_trusted() -> None:
+    """A 40-year-old against a 45 cap; the model scored this 5/10 in ~30% of runs."""
+    score = _score(0)
+    score.score_age = 5
+    apply_deterministic_rules(
+        score, _resume([], birth_year=1985), _job(None, age_max=45), "2026-08-02"
+    )
+    assert score.score_age == 10
+
+
+def test_age_just_over_the_cap_keeps_the_partial_band() -> None:
+    score = _score(0)
+    apply_deterministic_rules(
+        score, _resume([], birth_year=1979), _job(None, age_max=45), "2026-08-02"
+    )
+    assert score.score_age == 5   # 47 is 2 over

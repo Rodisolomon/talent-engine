@@ -24,7 +24,11 @@ from v1.resume_matching.baml_client.async_client import b
 from v1.resume_matching.baml_client.types import Job, MatchScore, Resume
 from v1.resume_matching.llm_call import with_timeout_retry
 from v1.resume_matching.llm_config import resolve_llm_provider
-from v1.resume_matching.public_schema import total_score, verdict_for
+from v1.resume_matching.public_schema import (
+    apply_deterministic_rules,
+    total_score,
+    verdict_for,
+)
 
 # Progress event callback signature. The router wires this to an SSE queue so
 # the frontend can render live counts. Keep callback non-awaiting-critical:
@@ -207,13 +211,15 @@ async def _score(
     today: str,
 ) -> MatchScore:
     async with sem:
-        return await with_timeout_retry(
+        score = await with_timeout_retry(
             lambda: b.ScoreMatch(
                 resume=resume, job=job, today=today,
                 baml_options={"client": provider},
             ),
             label="ScoreMatch",
         )
+    apply_deterministic_rules(score, resume, job, today)
+    return score
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +295,7 @@ async def score_pairs(
                     ),
                     label="ScoreMatch",
                 )
+            apply_deterministic_rules(score, resume, job, today)
             in_tok, out_tok = _collector_tokens(collector)
             counter["done"] += 1
             await _emit()

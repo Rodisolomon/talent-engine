@@ -58,13 +58,18 @@ function ScoreMatch(resume: Resume, job: Job, today: string) -> MatchScore {
     开发""数据库设计"进入 10-20 区间，但这些技能存在本身仍属于 4-9 档。
 
     【score_education 学历 0-20】
-    对照 resume.education 与 job.education_min。
-    学历阶梯：高中 ≈ 中专 < 专科 < 本科 < 研究生 < 博士
+    先判断下面两种情况，命中就直接定分，不要再去比阶梯：
+      · job.education_min 为 null（岗位不限学历）→ 20 分。岗位没提要求，
+        不应该在这一项上拉开差距。
+      · job.education_min 非 null，而 resume.education 为空、或其中没有
+        任何一条写明学历档次 → 0 分。简历没写学历，就不能当作达标 ——
+        缺信息不是达标。
+    两种都不命中时，取 resume.education 里最高的一档与 education_min 比：
+    高中 ≈ 中专 < 专科 < 本科 < 研究生 < 博士
     （中专与高中同级、略高；"中专以上"即中专档）
       20  达到或高于要求
       10  低一档
-      0   低两档及以上，或岗位有学历要求而简历未列明学历
-    education_min 为 null 时本项计 20（岗位不限学历，不应在此拉开差距）。
+      0   低两档及以上
     专业对口情况（majors_preferred，语义判断："软件工程技术"满足"计算机
     相关专业"，"汉语言文学"不满足）在本项内 ±5 调整，上下限仍是 0 和 20。
     学历不足只在本项扣分，不写入 hard_fails。
