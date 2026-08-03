@@ -165,6 +165,44 @@ def total_score(baml) -> int:
     return sum(score_components(baml).values())
 
 
+def apply_deterministic_rules(score, resume, job, today: str) -> None:
+    """Overwrite dimensions the model gets wrong on rules that need no judgement.
+
+    A rule belongs here when it can be decided from the inputs alone. The
+    prompt still states each one so the model's own reasoning stays coherent,
+    but the value it returns is not trusted — measured against deepseek-chat,
+    both rules below were wrong in roughly a third of runs.
+
+    Mutates `score` in place; callers hold it immediately after the BAML call.
+    `today` is an ISO date, the same value handed to the prompt.
+    """
+    # Education: a stated requirement against a resume listing no degree at
+    # all scores 0. Missing information is not the same as meeting the bar.
+    education = getattr(resume, "education", None) or []
+    if getattr(job, "education_min", None) and not any(
+        getattr(e, "degree", None) for e in education
+    ):
+        score.score_education = 0
+
+    # Age: fully computable from birth_year + today + the job's bounds, and
+    # observed scoring a 40-year-old as near-boundary against a ≤45 cap.
+    # Left to the model when age is unknown — treating that as a fail would
+    # be a policy choice the rubric doesn't make.
+    age = getattr(resume, "age", None)
+    birth_year = getattr(resume, "birth_year", None)
+    if age is None and birth_year:
+        age = int(today[:4]) - int(birth_year)
+    age_min = getattr(job, "age_min", None)
+    age_max = getattr(job, "age_max", None)
+    if age is not None and (age_min is not None or age_max is not None):
+        over = max(
+            (age - age_max) if age_max is not None else 0,
+            (age_min - age) if age_min is not None else 0,
+            0,
+        )
+        score.score_age = 10 if over == 0 else 5 if over <= 2 else 0
+
+
 def verdict_for(total: int, hard_fails: List[str]) -> str:
     """Verdict is a pure function of total + hard_fails, so Python owns it."""
     if hard_fails:
