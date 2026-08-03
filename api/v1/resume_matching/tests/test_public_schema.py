@@ -124,7 +124,8 @@ def test_to_baml_resume_handles_empty_optional_lists() -> None:
 
 def test_from_baml_score_carries_full_reasoning() -> None:
     score = BamlMatchScore(
-        score=87, verdict="可推荐",
+        score_experience=32, score_skills=15, score_education=20,
+        score_age=10, score_other=10,
         hard_fails=[],
         strengths=["学历匹配", "专业相关"],
         gaps=["缺少行业经验"],
@@ -133,8 +134,11 @@ def test_from_baml_score_carries_full_reasoning() -> None:
     item = from_baml_score(resume_id="r1", job_id="j1", score=score)
     assert item.resume_id == "r1"
     assert item.job_id == "j1"
+    # 87 = 32+15+20+10+10, summed here rather than taken from the model,
+    # and 87 >= 85 so the verdict is derived too — the model supplies neither.
     assert item.score == 87
-    assert item.verdict == "可推荐"
+    assert item.verdict == "强烈推荐"
+    assert item.score_experience == 32
     assert item.strengths == ["学历匹配", "专业相关"]
     assert item.gaps == ["缺少行业经验"]
     assert item.reasoning.startswith("整体")

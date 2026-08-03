@@ -82,9 +82,13 @@ def clear_async_jobs():
 
 
 class _BamlStub:
-    async def ScoreMatch(self, *, resume, job, baml_options=None) -> MatchScore:  # noqa: N802
+    async def ScoreMatch(  # noqa: N802
+        self, *, resume, job, today: str = "", baml_options=None,
+    ) -> MatchScore:
+        # 50 = 40+10; total and verdict are derived server-side now.
         return MatchScore(
-            score=50, verdict="可推荐", hard_fails=[],
+            score_experience=40, score_skills=10, score_education=0,
+            score_age=0, score_other=0, hard_fails=[],
             strengths=[], gaps=[], reasoning="stub",
         )
 

@@ -17,6 +17,7 @@ from typing import Any, Dict, List
 import pytest
 
 from v1.resume_matching import pipeline as pipeline_mod
+from v1.resume_matching.public_schema import SCORE_WEIGHTS, total_score
 from v1.resume_matching.baml_client.types import (
     Education,
     Experience,
@@ -63,9 +64,18 @@ def _fake_job(company: str, position: str, raw: str = "招聘单位：...") -> J
     )
 
 
-def _fake_score(score: int, verdict: str = "可推荐") -> MatchScore:
+def _split(total: int) -> dict[str, int]:
+    """Spread a desired total across the five dimensions, respecting caps."""
+    out, left = {}, total
+    for field, cap in SCORE_WEIGHTS.items():
+        out[field] = max(0, min(left, cap))
+        left -= out[field]
+    return out
+
+
+def _fake_score(score: int) -> MatchScore:
     return MatchScore(
-        score=score, verdict=verdict,
+        **_split(score),
         hard_fails=[], strengths=[f"match at {score}"],
         gaps=[], reasoning="",
     )
@@ -133,7 +143,7 @@ class BamlStub:
         return []
 
     async def ScoreMatch(  # noqa: N802
-        self, *, resume: Resume, job: Job, baml_options=None,
+        self, *, resume: Resume, job: Job, today: str = "", baml_options=None,
     ) -> MatchScore:
         self.calls["ScoreMatch"] += 1
         self.starts["ScoreMatch"].append(time.perf_counter())
@@ -211,7 +221,7 @@ async def test_returns_top_k_ranked_by_score(baml) -> None:
     )
     assert len(report.resumes) == 1
     top = report.resumes[0].top_matches
-    assert [m.score.score for m in top] == [95, 80, 70]
+    assert [total_score(m.score) for m in top] == [95, 80, 70]
     # Same order implied by the job_index pointing back into jobs[].
     companies = [report.jobs[m.job_index].job.company for m in top]
     assert companies == ["A-0", "C-0", "D-0"]
